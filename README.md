@@ -219,4 +219,8 @@ This project is licensed under the MIT License.
 
 ## Support
 
+<<<<<<< HEAD
 For support, please check the documentation or create an issue in the project repository.
+=======
+For support, please check the documentation or create an issue in the project repository.
+>>>>>>> 9b8fc4dd38cd402c6e31449910ff227e285bc971
