@@ -1,0 +1,7 @@
+node_modules
+meeting_notes.db
+__pycache__
+test*
+test_backend.py
+.env
+venv
