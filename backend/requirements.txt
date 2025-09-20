@@ -7,6 +7,9 @@ alembic
 python-dotenv
 httpx
 openai
+google-generativeai
+langchain
+langchain-google-genai
 python-multipart
 python-jose
 passlib

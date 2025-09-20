@@ -89,34 +89,49 @@ class VexaService:
             }
 
     def process_transcript_data(self, raw_transcript: Dict[str, Any]) -> str:
-        """Clean transcript data and extract text and speaker information"""
+        """
+        Clean transcript data and extract only text and speaker information.
+        Based on your example: data -> segments with text and speaker fields.
+        """
         try:
-            # The transcript structure may vary, but typically contains segments with text and speaker info
             processed_lines = []
             
-            # Handle different possible transcript structures
-            if "segments" in raw_transcript:
-                for segment in raw_transcript["segments"]:
-                    speaker = segment.get("speaker", "Unknown")
-                    text = segment.get("text", "")
-                    if text.strip():
-                        processed_lines.append(f"{speaker}: {text}")
-            
-            elif "transcript" in raw_transcript:
-                # Alternative structure
-                transcript_data = raw_transcript["transcript"]
-                if isinstance(transcript_data, list):
-                    for item in transcript_data:
-                        speaker = item.get("speaker", "Unknown")
-                        text = item.get("text", "")
-                        if text.strip():
+            # Handle the structure you showed: data -> segments array with text and speaker
+            if isinstance(raw_transcript, dict):
+                # Check for different possible structures
+                segments = None
+                if "data" in raw_transcript and "segments" in raw_transcript["data"]:
+                    segments = raw_transcript["data"]["segments"]
+                elif "segments" in raw_transcript:
+                    segments = raw_transcript["segments"]
+                elif "transcript" in raw_transcript and isinstance(raw_transcript["transcript"], list):
+                    segments = raw_transcript["transcript"]
+                
+                if segments and isinstance(segments, list):
+                    for segment in segments:
+                        # Extract only text and speaker as requested
+                        speaker = segment.get("speaker", "Unknown")
+                        text = segment.get("text", "")
+                        
+                        if text.strip():  # Only include segments with actual text
                             processed_lines.append(f"{speaker}: {text}")
             
-            # Fallback: try to extract any text content
-            if not processed_lines and "text" in raw_transcript:
-                processed_lines.append(raw_transcript["text"])
+            # If we couldn't extract segments, try to handle as a direct text
+            if not processed_lines:
+                if isinstance(raw_transcript, str):
+                    processed_lines.append(raw_transcript)
+                elif isinstance(raw_transcript, dict) and "text" in raw_transcript:
+                    processed_lines.append(raw_transcript["text"])
+                else:
+                    processed_lines.append("No readable transcript content found")
             
-            return "\n".join(processed_lines)
+            result = "\n".join(processed_lines)
+            print(f"Processed transcript with {len(processed_lines)} segments")
+            return result
+        
+        except Exception as e:
+            print(f"Error processing transcript: {e}")
+            return f"Error processing transcript: {str(e)}"
         
         except Exception as e:
             return f"Error processing transcript: {str(e)}"

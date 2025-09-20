@@ -1,79 +1,85 @@
-from openai import OpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
 import json
 import re
 import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from app.core.config import settings
+from app.models.task_models import TaskExtractionResponse, TaskModel
 
 
 class LLMService:
     def __init__(self):
-        self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        # Initialize LangChain's Gemini model with 2.5-flash
+        self.llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=settings.GEMINI_API_KEY,
+            temperature=0.0
+        )
+        
+        # Create output parser for structured response
+        self.output_parser = PydanticOutputParser(pydantic_object=TaskExtractionResponse)
 
-    def _extract_json_from_response(self, content: str) -> str:
-        """Extract JSON from LLM response, handling various formats"""
-        # Remove any leading/trailing whitespace
-        content = content.strip()
-        
-        # If content is wrapped in code blocks, extract it
-        if "```json" in content:
-            json_start = content.find("```json") + 7
-            json_end = content.find("```", json_start)
-            if json_end != -1:
-                content = content[json_start:json_end].strip()
-        elif "```" in content:
-            # Handle cases where it's just ```
-            json_start = content.find("```") + 3
-            json_end = content.rfind("```")
-            if json_end != -1 and json_end != json_start - 3:
-                content = content[json_start:json_end].strip()
-        
-        # Use regex to clean up problematic characters more aggressively
-        content = re.sub(r'^[\n\r\t\s"\']*', '', content)
-        content = re.sub(r'[\n\r\t\s"\']*$', '', content)
-        
-        # Try to extract JSON object/array using regex
-        json_pattern = r'(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}|\[[^\[\]]*(?:\[[^\[\]]*\][^\[\]]*)*\])'
-        json_match = re.search(json_pattern, content, re.DOTALL)
-        
-        if json_match:
-            content = json_match.group(1)
-        else:
-            # Fallback: find first { or [ and try to balance brackets
-            start_pos = -1
-            for i, char in enumerate(content):
-                if char in '{[':
-                    start_pos = i
-                    break
+    def _save_raw_transcript(self, transcript: str, meeting_id: str = None):
+        """Save raw transcript before any processing"""
+        try:
+            output_dir = "outputs"
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+                print(f"Created output directory: {output_dir}")
             
-            if start_pos != -1:
-                content = content[start_pos:]
-                # Try to find the matching closing bracket
-                if content[0] == '{':
-                    bracket_count = 0
-                    for i, char in enumerate(content):
-                        if char == '{':
-                            bracket_count += 1
-                        elif char == '}':
-                            bracket_count -= 1
-                            if bracket_count == 0:
-                                content = content[:i+1]
-                                break
-                elif content[0] == '[':
-                    bracket_count = 0
-                    for i, char in enumerate(content):
-                        if char == '[':
-                            bracket_count += 1
-                        elif char == ']':
-                            bracket_count -= 1
-                            if bracket_count == 0:
-                                content = content[:i+1]
-                                break
-        
-        return content
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"raw_transcript_{meeting_id}_{timestamp}.txt" if meeting_id else f"raw_transcript_{timestamp}.txt"
+            filepath = os.path.join(output_dir, filename)
+            
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write("="*80 + "\n")
+                f.write(f"RAW TRANSCRIPT\n")
+                f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                if meeting_id:
+                    f.write(f"Meeting ID: {meeting_id}\n")
+                f.write("="*80 + "\n\n")
+                f.write(transcript)
+                f.write("\n\n" + "="*80 + "\n")
+            
+            print(f"Raw transcript saved to: {filepath}")
+            return filepath
+            
+        except Exception as e:
+            print(f"Error saving raw transcript: {e}")
+            return None
 
-    def _save_to_output_file(self, transcript: str, llm_response: str, tasks: List[Dict], meeting_id: str = None):
+    def _save_llm_response(self, llm_response: str, meeting_id: str = None):
+        """Save LLM response before parsing"""
+        try:
+            output_dir = "outputs"
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"llm_response_{meeting_id}_{timestamp}.txt" if meeting_id else f"llm_response_{timestamp}.txt"
+            filepath = os.path.join(output_dir, filename)
+            
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write("="*80 + "\n")
+                f.write(f"LLM RAW RESPONSE\n")
+                f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                if meeting_id:
+                    f.write(f"Meeting ID: {meeting_id}\n")
+                f.write("="*80 + "\n\n")
+                f.write(llm_response)
+                f.write("\n\n" + "="*80 + "\n")
+            
+            print(f"LLM response saved to: {filepath}")
+            return filepath
+            
+        except Exception as e:
+            print(f"Error saving LLM response: {e}")
+            return None
+
+    def _save_to_output_file(self, transcript: str, llm_response: str, tasks: list, meeting_id: str = None):
         """Save transcript and LLM output to output.txt file"""
         try:
             output_dir = "outputs"
@@ -119,185 +125,169 @@ class LLMService:
         except Exception as e:
             print(f"Error saving output file: {e}")
 
-    def create_task_extraction_prompt(self, transcript: str, additional_context: Optional[str] = None) -> str:
-        """Create a prompt for task extraction from meeting transcript"""
-        base_prompt = """
-You are an AI assistant specialized in analyzing meeting transcripts to extract action items and assign them to people.
+    def create_task_extraction_prompt(self) -> PromptTemplate:
+        """Create a LangChain prompt template for task extraction"""
+        template = """
+You are an expert AI assistant specialized in analyzing meeting transcripts to extract actionable tasks.
 
-Your task is to analyze the following meeting transcript and extract actionable tasks, assigning them to the appropriate people mentioned in the meeting.
+Your job is to:
+1. Identify clear action items that require someone to DO something
+2. Extract the person responsible (assignee) from the conversation
+3. Determine priority based on urgency discussed
+4. Set reasonable deadlines based on context mentioned
+5. Create clear, actionable task descriptions
 
-For each person mentioned who has been assigned tasks or responsibilities, provide the output in the following JSON format:
-
-{
-    "tasks": [
-        {
-            "assignee_name": "Person's Name",
-            "task_description": "Clear, actionable description of what they need to do",
-            "deadline": "Deadline if mentioned (e.g., 'next Friday', 'by end of week', 'March 15th') or null if not specified",
-            "priority": "high/medium/low if mentioned, otherwise null"
-        }
-    ]
-}
-
-Guidelines:
-1. Only extract tasks that are clearly actionable and assigned to specific people
-2. Be specific about what needs to be done
-3. Include deadlines only if they are explicitly mentioned or strongly implied
-4. Use the exact names as mentioned in the transcript
-5. If someone is mentioned but no specific task is assigned, do not include them
-6. Group similar tasks for the same person if appropriate
-7. Make task descriptions clear and actionable
+Rules:
+- Only extract tasks that are explicitly actionable (not just discussions)
+- Use exact names mentioned in the transcript
+- If no assignee is clear, use "Unassigned"
+- Priority should be "High", "Medium", or "Low"
+- Deadline format: YYYY-MM-DD or null if not mentioned
+- Make task descriptions specific and actionable
 
 Meeting Transcript:
 {transcript}
+
+{format_instructions}
 """
         
-        if additional_context:
-            base_prompt += f"\n\nAdditional Context:\n{additional_context}"
-        
-        return base_prompt.format(transcript=transcript)
+        return PromptTemplate(
+            template=template,
+            input_variables=["transcript"],
+            partial_variables={"format_instructions": self.output_parser.get_format_instructions()}
+        )
 
-    def create_task_modification_prompt(self, transcript: str, existing_tasks: List[Dict], modification_request: str, additional_context: Optional[str] = None) -> str:
-        """Create a prompt for modifying existing task assignments"""
-        existing_tasks_json = json.dumps(existing_tasks, indent=2)
-        
-        prompt = f"""
+    def create_task_modification_prompt(self) -> PromptTemplate:
+        """Create a LangChain prompt template for task modification"""
+        template = """
 You are an AI assistant helping to modify task assignments from a meeting transcript based on user feedback.
 
 Original Meeting Transcript:
 {transcript}
 
 Current Task Assignments:
-{existing_tasks_json}
+{existing_tasks}
 
 User's Modification Request:
 {modification_request}
 
-Based on the user's request, please provide updated task assignments in the same JSON format:
+Based on the user's request, please provide updated task assignments. Incorporate the user's modifications while keeping the original context and only include actionable tasks assigned to specific people.
 
-{{
-    "tasks": [
-        {{
-            "assignee_name": "Person's Name",
-            "task_description": "Clear, actionable description of what they need to do",
-            "deadline": "Deadline if mentioned or null if not specified",
-            "priority": "high/medium/low if mentioned, otherwise null"
-        }}
-    ]
-}}
-
-Guidelines:
-1. Incorporate the user's modifications while keeping the original context
-2. Maintain the same JSON structure
-3. Only include actionable tasks assigned to specific people
-4. Be specific and clear in task descriptions
+{format_instructions}
 """
         
-        if additional_context:
-            prompt += f"\n\nAdditional Context:\n{additional_context}"
-        
-        return prompt
+        return PromptTemplate(
+            template=template,
+            input_variables=["transcript", "existing_tasks", "modification_request"],
+            partial_variables={"format_instructions": self.output_parser.get_format_instructions()}
+        )
 
     async def extract_tasks_from_transcript(self, transcript: str, additional_context: Optional[str] = None, meeting_id: str = None) -> Dict[str, Any]:
-        """Extract tasks from meeting transcript using LLM"""
+        """Extract tasks from meeting transcript using LangChain structured output with Gemini 2.5 Flash"""
         try:
-            prompt = self.create_task_extraction_prompt(transcript, additional_context)
+            # Save the transcript before processing as requested
+            self._save_raw_transcript(transcript, meeting_id)
             
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You are an expert at analyzing meeting transcripts and extracting actionable tasks. Always respond with valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=2000
+            # Create the prompt template
+            prompt_template = self.create_task_extraction_prompt()
+            
+            # Create the chain: prompt -> LLM -> parser
+            chain = prompt_template | self.llm | self.output_parser
+            
+            # Execute the chain
+            result = await chain.ainvoke({"transcript": transcript})
+            
+            # Convert Pydantic model to dict for compatibility with existing API
+            tasks_data = []
+            for task in result.tasks:
+                tasks_data.append({
+                    "title": task.title,
+                    "task_description": task.description,  # Map to existing field name
+                    "assignee_name": task.assignee,        # Map to existing field name
+                    "priority": task.priority,
+                    "status": task.status,
+                    "deadline": task.deadline,
+                    "category": task.category
+                })
+            
+            # Save successful result
+            self._save_to_output_file(
+                transcript, 
+                f"LANGCHAIN STRUCTURED OUTPUT SUCCESS:\n{json.dumps(tasks_data, indent=2)}", 
+                tasks_data, 
+                meeting_id
             )
             
-            content = response.choices[0].message.content.strip()
+            print(f"✅ Successfully extracted {len(tasks_data)} tasks using LangChain structured output")
             
-            # Clean the content to extract JSON
-            cleaned_content = self._extract_json_from_response(content)
+            return {
+                "success": True,
+                "tasks": tasks_data
+            }
             
-            # Try to parse JSON response
-            try:
-                result = json.loads(cleaned_content)
-                tasks = result.get("tasks", [])
-                
-                # Save to output file
-                self._save_to_output_file(transcript, content, tasks, meeting_id)
-                
-                return {
-                    "success": True,
-                    "tasks": tasks
-                }
-            except json.JSONDecodeError as e:
-                print(f"JSON parsing failed. Original content: {repr(content)}")
-                print(f"Cleaned content: {repr(cleaned_content)}")
-                print(f"JSON error: {e}")
-                
-                # Save raw response for debugging
-                self._save_to_output_file(transcript, f"PARSING FAILED:\n{content}", [], meeting_id)
-                
-                return {
-                    "success": False,
-                    "error": f"Failed to parse LLM response as JSON: {str(e)}. Content: {content[:200]}..."
-                }
-        
         except Exception as e:
+            print(f"❌ LangChain Gemini API Error: {str(e)}")
+            
+            # Save error details
+            self._save_to_output_file(
+                transcript, 
+                f"LANGCHAIN ERROR:\n{str(e)}", 
+                [], 
+                meeting_id
+            )
+            
             return {
                 "success": False,
-                "error": f"Error processing with LLM: {str(e)}"
+                "error": f"Error processing with LangChain Gemini: {str(e)}"
             }
 
     async def modify_task_assignments(self, transcript: str, existing_tasks: List[Dict], modification_request: str, additional_context: Optional[str] = None) -> Dict[str, Any]:
-        """Modify existing task assignments based on user request"""
+        """Modify existing task assignments based on user request using LangChain structured output"""
         try:
-            prompt = self.create_task_modification_prompt(transcript, existing_tasks, modification_request, additional_context)
+            # Create the prompt template
+            prompt_template = self.create_task_modification_prompt()
             
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You are an expert at modifying task assignments based on user feedback. Always respond with valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=2000
+            # Create the chain: prompt -> LLM -> parser
+            chain = prompt_template | self.llm | self.output_parser
+            
+            # Execute the chain
+            result = await chain.ainvoke({
+                "transcript": transcript,
+                "existing_tasks": json.dumps(existing_tasks, indent=2),
+                "modification_request": modification_request
+            })
+            
+            # Convert Pydantic model to dict for compatibility with existing API
+            tasks_data = []
+            for task in result.tasks:
+                tasks_data.append({
+                    "title": task.title,
+                    "task_description": task.description,  # Map to existing field name
+                    "assignee_name": task.assignee,        # Map to existing field name
+                    "priority": task.priority,
+                    "status": task.status,
+                    "deadline": task.deadline,
+                    "category": task.category
+                })
+            
+            # Save to output file for modification requests
+            self._save_to_output_file(
+                transcript, 
+                f"MODIFICATION REQUEST: {modification_request}\n\nLangChain RESPONSE:\n{json.dumps(tasks_data, indent=2)}", 
+                tasks_data, 
+                "modification"
             )
             
-            content = response.choices[0].message.content.strip()
+            return {
+                "success": True,
+                "tasks": tasks_data
+            }
             
-            # Clean the content to extract JSON
-            cleaned_content = self._extract_json_from_response(content)
-            
-            # Try to parse JSON response
-            try:
-                result = json.loads(cleaned_content)
-                tasks = result.get("tasks", [])
-                
-                # Save to output file for modification requests
-                self._save_to_output_file(transcript, f"MODIFICATION REQUEST: {modification_request}\n\nLLM RESPONSE:\n{content}", tasks, "modification")
-                
-                return {
-                    "success": True,
-                    "tasks": tasks
-                }
-            except json.JSONDecodeError as e:
-                print(f"JSON parsing failed in modify_task_assignments. Original content: {repr(content)}")
-                print(f"Cleaned content: {repr(cleaned_content)}")
-                print(f"JSON error: {e}")
-                
-                # Save raw response for debugging
-                self._save_to_output_file(transcript, f"MODIFICATION PARSING FAILED:\nREQUEST: {modification_request}\nRESPONSE: {content}", [], "modification_failed")
-                
-                return {
-                    "success": False,
-                    "error": f"Failed to parse LLM response as JSON: {str(e)}. Content: {content[:200]}..."
-                }
-        
         except Exception as e:
+            print(f"❌ LangChain modification error: {str(e)}")
             return {
                 "success": False,
-                "error": f"Error processing modification with LLM: {str(e)}"
+                "error": f"Error processing modification with LangChain Gemini: {str(e)}"
             }
 
 
